@@ -1,7 +1,7 @@
-all: ../../public_html/cgi-bin/hw3.cgi
+all: ../../public_html/cgi-bin/hw4.cgi
 
-../../public_html/cgi-bin/hw3.cgi: hw3.c
+../../public_html/cgi-bin/hw4.cgi: hw4.c
 	gcc -o $@ $< 
 
 clean:
-	rm ../../public_html/cgi-bin/hw3.cgi
+	rm ../../public_html/cgi-bin/hw4.cgi

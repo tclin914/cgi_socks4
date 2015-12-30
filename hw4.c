@@ -42,6 +42,8 @@ int printMsg(const int i, char* string);
 char* hosts[5];
 char* ports[5];
 char* files[5];
+char* socksip[5];
+char* socksport[5];
 FILE* filefps[5];
 
 int main(int argc,char *argv[])
@@ -49,9 +51,6 @@ int main(int argc,char *argv[])
     int nbHost = 0;
     char* queryString = getenv("QUERY_STRING");
     parseString(queryString, &nbHost);
-    /* nbHost = 1; */
-    /* hosts[0] = "140.113.168.191"; */
-    /* ports[0] = "5577"; */
 
     printf(HEAD);
     printf(BODY);
@@ -68,31 +67,32 @@ int main(int argc,char *argv[])
     printf(TAIL);
     fflush(stdout);
 
-    /* FILE* filefp = fopen("t5.txt", "r"); */
     for (int i = 0; i < nbHost; i++) {
         filefps[i] = fopen(files[i], "r");
     }
     
     int n;
-    int host_fd[5] = { 0};
-    struct sockaddr_in host_sin[5];
-    /* struct sockaddr_in host_sin, cli_sin; */
-    memset(&host_sin, 0, sizeof(host_sin));
+    int socks_fd[5] = { 0};
+    struct sockaddr_in socks_sin[5];
+    memset(&socks_sin, 0, sizeof(socks_sin));
     for (int i = 0; i < nbHost; i++) {
-        host_fd[i] = socket(AF_INET, SOCK_STREAM, 0);
-        bzero(&host_sin[i], sizeof(host_sin[i]));
-        host_sin[i].sin_family = AF_INET;
-        host_sin[i].sin_addr.s_addr = inet_addr(hosts[i]);
-        host_sin[i].sin_port = htons(atoi(ports[i]));
-       
-        int flags = fcntl(host_fd[i], F_GETFL, 0);
-        fcntl(host_fd[i], F_SETFL, flags | O_NONBLOCK);
+        socks_fd[i] = socket(AF_INET, SOCK_STREAM, 0);
+        bzero(&socks_sin[i], sizeof(socks_sin[i]));
+        socks_sin[i].sin_family = AF_INET;
+        socks_sin[i].sin_addr.s_addr = inet_addr(socksip[i]);
+        socks_sin[i].sin_port = htons(atoi(socksport[i]));
         
-        if ((n = connect(host_fd[i], (struct sockaddr*)&host_sin[i], sizeof(host_sin[i]))) < 0) {
+        int flags = fcntl(socks_fd[i], F_GETFL, 0);
+        fcntl(socks_fd[i], F_SETFL, flags | O_NONBLOCK);
+        
+        if ((n = connect(socks_fd[i], (struct sockaddr*)&socks_sin[i], sizeof(socks_sin[i]))) < 0) {
             if (errno != EINPROGRESS) 
                 printf("connect error\n");
         }
     }
+
+    unsigned char request[11];
+    memset(request, 0, 11);
 
     fd_set rfds;
     fd_set wfds;
@@ -107,8 +107,8 @@ int main(int argc,char *argv[])
     FD_ZERO(&ws);
    
     for (int i = 0; i < nbHost; i++) {
-        FD_SET(host_fd[i], &rs);
-        FD_SET(host_fd[i], &ws);
+        FD_SET(socks_fd[i], &rs);
+        FD_SET(socks_fd[i], &ws);
     }
     
     rfds = rs;
@@ -121,25 +121,37 @@ int main(int argc,char *argv[])
     int i;
     int error;
     char recv_buf[2048];
-	char command_buf[1024];
+    char command_buf[1024];
     while (conn > 0) {
         memcpy(&rfds, &rs, sizeof(rfds));
         memcpy(&wfds, &ws, sizeof(wfds));
 
         if (select(nfds, &rfds, &wfds, (fd_set*)0, (struct timeval*)0) < 0) printf("select error\n");
+        
         for (i = 0; i < 5; i++) {
             status = statuses[i];
-            fd = host_fd[i];
-
+            fd = socks_fd[i];
+            
             if (status == F_CONNECTING && (FD_ISSET(fd, &rfds) || FD_ISSET(fd, &wfds))) {
                 if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (void*)&error, &n) < 0 || error != 0) {
                     printf("non-blocking error\n");
                 }
+
+                request[0] = 4;
+                request[1] = 1;
+                request[2] = (unsigned char)(atoi(ports[i]) / 255);
+                request[3] = (unsigned char)(atoi(ports[i]) % 256);
+                sscanf(hosts[i], "%hhu.%hhu.%hhu.%hhu", &(request[4]), &(request[5]), &(request[6]), 
+                        &(request[7]));
+
+                n = write(fd, request, 8);
+                
                 statuses[i] = F_READING;
-                FD_CLR(host_fd[i], &ws);  
+                FD_CLR(socks_fd[i], &ws);  
             } else if (status == F_WRITING && FD_ISSET(fd, &wfds)) {
                 memset(command_buf, 0, 1024);
                 int len = readline(fileno(filefps[i]),  command_buf, sizeof(command_buf)); 
+                // recogniza 13 and 10
                 int c = 0;
                 while (command_buf[len - 1 - c] == 13 || command_buf[len - 1 - c] == 10) {
                     c++;
@@ -153,12 +165,13 @@ int main(int argc,char *argv[])
                 n = write(fd, command_buf, len + 1); 
                 if (n > 0) {
                     statuses[i] = F_READING;
-                    FD_CLR(host_fd[i], &ws);
-                    FD_SET(host_fd[i], &rs);
+                    FD_CLR(socks_fd[i], &ws);
+                    FD_SET(socks_fd[i], &rs);
                 }
             } else if (status == F_READING && FD_ISSET(fd, &rfds)) {
                 memset(recv_buf, 0, 2048);
                 n = read(fd, recv_buf, sizeof(recv_buf) - 1);
+                // recognize 13 and 10
                 int c = 1;
                 while (recv_buf[n - 1 - c] == 13 || command_buf[n - 1 - c] == 10) {
                     c++;                        
@@ -166,24 +179,21 @@ int main(int argc,char *argv[])
                 recv_buf[n - c] = '\0';
                 if (n > 0) {
                     printMsg(i, recv_buf);
-                    /* if (printMsg(i, recv_buf) == 1) { */
+                    /* if (printMsg(i, recv_buf) == 1) {  */
                     if (recv_buf[strlen(recv_buf) - 2] == '%') {
                         statuses[i] = F_WRITING;
-                        FD_CLR(host_fd[i], &rs);
-                        FD_SET(host_fd[i], &ws);
+                        FD_CLR(socks_fd[i], &rs);
+                        FD_SET(socks_fd[i], &ws);
                     }
                 } else {
-                    close(host_fd[i]);
-                    FD_CLR(host_fd[i], &rs);
+                    close(socks_fd[i]);
+                    FD_CLR(socks_fd[i], &rs);
                     statuses[i] = F_DONE;
                     conn--;
                 }
             }
         }
-
     }
-    
-    /* close(host_fd[0]); */
 
     return 0;
 }
@@ -217,19 +227,22 @@ void parseString(char* string, int* nbHost) {
     int count = 0;
     pair = strtok(string, "&");
     while (pair != NULL) {
-        switch (count % 3) {
+        switch (count % 5) {
             case 0:
-                hosts[count / 3] = (pair + 3);
+                hosts[count / 5] = (pair + 3);
                 if (strlen(pair + 3) > 0) (*nbHost)++;
-                /* printf("%s\n", hosts[count / 3]); */
                 break;
             case 1:
-                ports[count / 3] = (pair + 3);
-                /* printf("%s\n", ports[count / 3]); */
+                ports[count / 5] = (pair + 3);
                 break;
             case 2:
-                files[count / 3] = (pair + 3);
-                /* printf("%s\n", files[count / 3]); */
+                files[count / 5] = (pair + 3);
+                break;
+            case 3:
+                socksip[count / 5] = (pair + 4);
+                break;
+            case 4:
+                socksport[count / 5] = (pair + 4);
                 break;
         }
         ++count;
@@ -277,7 +290,6 @@ int printMsg(const int i, char* string) {
         ++string;
     }
     if (strlen(buf) > 0) {
-        /* buf[c] = '\0'; */
         printf(SCRIPT_MESSAGE, mlist[i], buf);
         fflush(stdout);
     }
